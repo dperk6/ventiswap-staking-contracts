@@ -2,15 +2,17 @@
 
 pragma solidity ^0.8.0;
 
-import "hardhat/console.sol";
 import "./interfaces/IERC20.sol";
 import "./interfaces/IERC721.sol";
 import "./interfaces/IERC721Receiver.sol";
+import "./interfaces/IVentiheadzStake.sol";
 import "./libraries/SafeERC20.sol";
 import "./libraries/Math.sol";
+import "./libraries/NFTStake.sol";
 
-contract VentiHeadzStake is IERC721Receiver {
+contract VentiHeadzStake is IERC721Receiver, IVentiheadzStake {
     using SafeERC20 for IERC20;
+    using NFTStake for UserData;
 
     IERC20 private constant VST = IERC20(0xb7C2fcD6d7922eddd2A7A9B0524074A60D5b472C);
     // IERC721 private constant VENTI_HEADZ = IERC721(0x1343248Cbd4e291C6979e70a138f4c774e902561);
@@ -21,21 +23,6 @@ contract VentiHeadzStake is IERC721Receiver {
     uint256 private _totalRewards;
     mapping (address => UserData) private _deposits;
     mapping (address => uint256) private _rewardPaid;
-    
-    struct ContractData {
-        uint8 isActive;
-        uint8 mutex;
-        uint16 maxStake;
-        uint16 totalStaked;
-        uint32 timeEnded;
-        uint128 monthlyReward;
-    }
-
-    struct UserData {
-        uint16 totalStaked;
-        uint32 timeStaked;
-        uint16[] tokens;
-    }
 
     constructor (address nft_) {
         _data.isActive = 1;
@@ -49,6 +36,13 @@ contract VentiHeadzStake is IERC721Receiver {
 
     fallback() external {}
     receive() external payable {}
+
+    modifier nonReentrant() {
+        require(_data.mutex == 1, "Nonreentrant");
+        _data.mutex = 2;
+        _;
+        _data.mutex = 1;
+    }
 
     /**
      * @dev Get total amount of NFTs staked
@@ -94,9 +88,11 @@ contract VentiHeadzStake is IERC721Receiver {
      *
      * @return tokenIds the list of token ids staked by the account
      */
-    function tokensStaked(address account) external view returns (uint16[] memory)
+    function tokensStaked(address account) public view returns (uint256[] memory)
     {
-        return _deposits[account].tokens;
+        UserData memory userDeposit = _deposits[account];
+
+        return userDeposit.stakedTokens();
     }
 
     /**
@@ -168,16 +164,7 @@ contract VentiHeadzStake is IERC721Receiver {
 
         UserData memory user = _deposits[account];
 
-        if (user.totalStaked == 0) {
-            return 0;
-        }
-
-        uint256 timePassed = block.timestamp - user.timeStaked;
-        uint256 periodsPassed = timePassed > 0 ? Math.floorDiv(timePassed, 7884000) : 0;
-        uint256 interimTime = timePassed - (periodsPassed * 7884000);
-        uint256 pending = user.totalStaked * (_data.monthlyReward * 3) * interimTime / 7884000;
-
-        return pending;
+        return user.pendingReward(_data.monthlyReward);
     }
 
     /**
@@ -193,15 +180,8 @@ contract VentiHeadzStake is IERC721Receiver {
         
         uint256 rewardsPaid = _rewardPaid[account];
         uint256 endTime = _data.timeEnded == 0 ? block.timestamp : _data.timeEnded;
-        uint256 periodsPassed = Math.floorDiv(endTime - user.timeStaked, 7884000);
 
-        if (periodsPassed == 0) {
-            return 0;
-        }
-
-        uint256 totalReward = user.totalStaked * (_data.monthlyReward * 3) - rewardsPaid;
-
-        return totalReward;
+        return user.earned(rewardsPaid, _data.monthlyReward, endTime);
     }
 
     /**
@@ -212,11 +192,19 @@ contract VentiHeadzStake is IERC721Receiver {
      * @notice Checks if user has already staked. If so, claim rewards and reset
      * claimed rewards to 0 and timestamp to current block.
      */
-    function stakeToken(uint16 tokenId) external
+    function stakeToken(uint16 tokenId) external nonReentrant
     {
+        VENTI_HEADZ.safeTransferFrom(msg.sender, address(this), tokenId);
+
         UserData storage user = _deposits[msg.sender];
 
-        require(user.totalStaked + 1 <= _data.maxStake, "You've reached the max stake");
+        require(user.totalStaked + 1 <= 5, "Max stake exceeded");
+
+        if (user.totalStaked == 0) user.id1 = tokenId;
+        else if (user.totalStaked == 1) user.id2 = tokenId;
+        else if (user.totalStaked == 2) user.id3 = tokenId;
+        else if (user.totalStaked == 3) user.id4 = tokenId;
+        else if (user.totalStaked == 4) user.id5 = tokenId;
 
         if (user.totalStaked > 0) {
             uint256 pending = pendingReward(msg.sender);
@@ -230,9 +218,7 @@ contract VentiHeadzStake is IERC721Receiver {
             }
         }
 
-        VENTI_HEADZ.safeTransferFrom(msg.sender, address(this), tokenId);
-
-        user.tokens.push(tokenId);
+        _data.totalStaked += 1;
         user.totalStaked += 1;
         user.timeStaked = uint32(block.timestamp);
 
@@ -247,11 +233,13 @@ contract VentiHeadzStake is IERC721Receiver {
      * @notice Checks if user has already staked. If so, claim rewards and reset
      * claimed rewards to 0 and timestamp to current block.
      */
-    function stakeMany(uint16[] memory tokenIds) external
-    {
-        require(tokenIds.length < 6, "Maximum 5 NFTs at once");
-        
+    function stakeMany(uint16[] memory tokenIds) external nonReentrant
+    {   
         UserData storage user = _deposits[msg.sender];
+
+        uint256 total = user.totalStaked;
+
+        require(total + tokenIds.length < 5, "Exceeding max stake");
 
         if (user.totalStaked > 0) {
             uint256 pending = pendingReward(msg.sender);
@@ -264,19 +252,30 @@ contract VentiHeadzStake is IERC721Receiver {
                 VST.transfer(msg.sender, combined);        
             }            
         }
-        
-        uint256 totalTokens = tokenIds.length;
 
-        for (uint i = 0; i < totalTokens;) {
+        for (uint i = 0; i < tokenIds.length;) {
             VENTI_HEADZ.safeTransferFrom(msg.sender, address(this), tokenIds[i]);
-            user.tokens.push(tokenIds[i]);
+
+            if (total == 0) {
+                user.id1 = tokenIds[i];
+            } else if (total == 1) {
+                user.id2 = tokenIds[i];
+            } else if (total == 2) {
+                user.id3 = tokenIds[i];
+            } else if (total == 3) {
+                user.id4 = tokenIds[i];
+            } else if (total == 4) {
+                user.id5 = tokenIds[i];
+            }
             
             emit NFTStaked(msg.sender, tokenIds[i]);
 
+            unchecked { ++total; }
             unchecked { ++i; }
         }
 
-        user.totalStaked += uint16(totalTokens);
+        _data.totalStaked += uint16(tokenIds.length);
+        user.totalStaked += uint16(tokenIds.length);
         user.timeStaked = uint32(block.timestamp);
     }
 
@@ -305,28 +304,32 @@ contract VentiHeadzStake is IERC721Receiver {
      * @notice it finds the index of the nft id, replaces and
      * removes it from the list.
      */
-    function withdraw(uint16 tokenId) external
+    function withdraw(uint16 tokenId) external nonReentrant
     {
         UserData storage user = _deposits[msg.sender];
 
-        uint256 index = 6;
-
-        for (uint i = 0; i < user.tokens.length;) {
-            if (user.tokens[i] == tokenId) {
-                index = i;
-                break;
-            }
-
-            unchecked { ++i; }
-        }
-
-        require(index < 6, "Token ID not staked by user");
-
-        user.tokens[index] = user.tokens[user.tokens.length - 1];
-        user.tokens.pop();
-        user.totalStaked -= 1;
+        uint256 reward = earned(msg.sender);
+        require(user.withdrawId(tokenId));
 
         VENTI_HEADZ.safeTransferFrom(address(this), msg.sender, tokenId);
+        _data.totalStaked -= 1;
+
+        if (user.totalStaked == 0) {
+            delete _deposits[msg.sender];
+        }
+        else {
+            if (reward > 0) {
+                _rewardPaid[msg.sender] += reward;
+                _totalRewards -= reward;
+
+                VST.safeTransfer(msg.sender, reward);
+
+                emit RewardsPaid(msg.sender, reward);
+            }
+
+            uint256 endTime = _data.timeEnded == 0 ? block.timestamp : _data.timeEnded;
+            _rewardPaid[msg.sender] = user.earned(0, _data.monthlyReward, endTime);
+        }
 
         emit NFTWithdrawn(msg.sender, tokenId);
     }
@@ -337,16 +340,16 @@ contract VentiHeadzStake is IERC721Receiver {
      * @notice removes all staked NFTs, claims all outstanding rewards, and
      * resets all data to 0.
      */
-    function withdrawAll() external
+    function withdrawAll() external nonReentrant
     {
         UserData storage user = _deposits[msg.sender];
         
         require(user.totalStaked > 0, "No tokens staked");
 
         uint256 reward = earned(msg.sender);
+        _rewardPaid[msg.sender] = 0;
 
         if (reward > 0) {
-            _rewardPaid[msg.sender] = 0;
             _totalRewards -= reward;
 
             VST.transfer(msg.sender, reward);
@@ -354,15 +357,31 @@ contract VentiHeadzStake is IERC721Receiver {
             emit RewardsPaid(msg.sender, reward);
         }
 
-        for (uint i = 0; i < user.tokens.length;) {
-            VENTI_HEADZ.safeTransferFrom(address(this), msg.sender, user.tokens[i]);
+        uint16 total = user.totalStaked;
+        user.totalStaked = 0;
 
-            emit NFTWithdrawn(msg.sender, user.tokens[i]);
-
-            unchecked { ++i; }
+        if (total > 0) {
+            VENTI_HEADZ.safeTransferFrom(address(this), msg.sender, user.id1);
+            emit NFTWithdrawn(msg.sender, user.id1);
+        }
+        if (total > 1) {
+            VENTI_HEADZ.safeTransferFrom(address(this), msg.sender, user.id2);
+            emit NFTWithdrawn(msg.sender, user.id2);
+        }
+        if (total > 2) {
+            VENTI_HEADZ.safeTransferFrom(address(this), msg.sender, user.id3);
+            emit NFTWithdrawn(msg.sender, user.id3);
+        }
+        if (total > 3) {
+            VENTI_HEADZ.safeTransferFrom(address(this), msg.sender, user.id4);
+        }
+        if (total > 4) {
+            VENTI_HEADZ.safeTransferFrom(address(this), msg.sender, user.id5);
         }
 
         delete _deposits[msg.sender];
+
+        _data.totalStaked -= total;
     }
 
     /**
@@ -377,12 +396,26 @@ contract VentiHeadzStake is IERC721Receiver {
 
         require(user.totalStaked > 0, "No tokens staked");
 
-        for (uint i = 0; i < user.tokens.length;) {
-            VENTI_HEADZ.safeTransferFrom(address(this), msg.sender, user.tokens[i]);
+        uint256 total = user.totalStaked;
+        user.totalStaked = 0;
 
-            emit NFTWithdrawn(msg.sender, user.tokens[i]);
-
-            unchecked { ++i; }
+        if (total > 0) {
+            VENTI_HEADZ.safeTransferFrom(address(this), msg.sender, user.id1);
+            emit NFTWithdrawn(msg.sender, user.id1);
+        }
+        if (total > 1) {
+            VENTI_HEADZ.safeTransferFrom(address(this), msg.sender, user.id2);
+            emit NFTWithdrawn(msg.sender, user.id2);
+        }
+        if (total > 2) {
+            VENTI_HEADZ.safeTransferFrom(address(this), msg.sender, user.id3);
+            emit NFTWithdrawn(msg.sender, user.id3);
+        }
+        if (total > 3) {
+            VENTI_HEADZ.safeTransferFrom(address(this), msg.sender, user.id4);
+        }
+        if (total > 4) {
+            VENTI_HEADZ.safeTransferFrom(address(this), msg.sender, user.id5);
         }
 
         delete _deposits[msg.sender];
@@ -399,9 +432,8 @@ contract VentiHeadzStake is IERC721Receiver {
     {
         require(msg.sender == _owner, "Must be owner");
 
-        _totalRewards += amount;
-
         VST.safeTransferFrom(msg.sender, address(this), amount);
+        _totalRewards += amount;
 
         emit RewardsAdded(amount);
     }
@@ -457,13 +489,4 @@ contract VentiHeadzStake is IERC721Receiver {
     ) public virtual override returns (bytes4) {
         return this.onERC721Received.selector;
     }
-
-    // ##### EVENTS ##### //
-
-    event RewardsAdded(uint256 amount);
-    event RewardsRemoved(uint256 amount);
-    event RewardsPaid(address indexed owner, uint256 amount);
-    event NFTStaked(address indexed owner, uint256 nftId);
-    event NFTWithdrawn(address indexed owner, uint256 nftId);
-    event RewardsClaimed(address indexed owner, uint256 rewards);
 }
