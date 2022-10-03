@@ -40,9 +40,6 @@ const config: HardhatUserConfig = {
       chainId: 1337,
       forking: {
         url: process.env.ALCHEMY || ""
-      },
-      accounts: {
-        mnemonic: process.env.MNEMONIC || ""
       }
     },
     mainnet: {
