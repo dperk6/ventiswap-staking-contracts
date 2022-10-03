@@ -134,7 +134,7 @@ contract VentiHeadzStake is IERC721Receiver, IVentiheadzStake {
      *
      * @return canWithdraw whether user can withdraw or not
      */
-    function withdrawable(address account) external view returns (bool)
+    function withdrawable(address account) public view returns (bool)
     {
         uint256 unlockTime = getUnlockTime(account);
 
@@ -307,7 +307,8 @@ contract VentiHeadzStake is IERC721Receiver, IVentiheadzStake {
     function withdraw(uint16 tokenId) external nonReentrant
     {
         UserData storage user = _deposits[msg.sender];
-
+        require(withdrawable(msg.sender), "NFTs still locked");
+        
         uint256 reward = earned(msg.sender);
         require(user.withdrawId(tokenId));
 
@@ -345,6 +346,7 @@ contract VentiHeadzStake is IERC721Receiver, IVentiheadzStake {
         UserData storage user = _deposits[msg.sender];
         
         require(user.totalStaked > 0, "No tokens staked");
+        require(withdrawable(msg.sender), "NFTs still locked");
 
         uint256 reward = earned(msg.sender);
         _rewardPaid[msg.sender] = 0;
@@ -395,6 +397,7 @@ contract VentiHeadzStake is IERC721Receiver, IVentiheadzStake {
         UserData storage user = _deposits[msg.sender];
 
         require(user.totalStaked > 0, "No tokens staked");
+        require(_data.timeEnded > 0, "Contract still active");
 
         uint256 total = user.totalStaked;
         user.totalStaked = 0;
